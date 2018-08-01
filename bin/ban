@@ -1,0 +1,81 @@
+#!/usr/bin/env php
+<?php
+
+require_once __DIR__ . '/../vendor/autoload.php';
+
+$env = new \Dotenv\Dotenv(__DIR__ . '/../');
+
+$env->load();
+
+$env->required(['CF_USER', 'CF_API_KEY', 'CF_ACCOUNT_ID']);
+
+$user    = getenv('CF_USER');
+$api_key = getenv('CF_API_KEY');
+$account = getenv('CF_ACCOUNT_ID');
+
+$api = new GuzzleHttp\Client([
+    'base_uri' => "https://api.cloudflare.com/client/v4/accounts/$account/firewall/access_rules/rules",
+    'headers'  => [
+        'User-Agent'   => 'github.com/luceos/fail2ban-cf',
+        'X-Auth-Email' => $user,
+        'X-Auth-Key'   => $api_key
+    ]
+]);
+
+$ips  = [];
+$mode = 'ban';
+
+foreach ($argv as $i => $arg) {
+    if ($i === 0) {
+        continue;
+    }
+    if ($i === 1 && in_array($arg, ['-', '+'])) {
+        $mode = $arg === '-' ? 'unban' : $mode;
+        continue;
+    }
+
+    if (!filter_var($arg, FILTER_VALIDATE_IP)) {
+        die("Not a valid IP provided: $arg");
+    }
+
+    $ips[] = $arg;
+}
+
+$response = $api->get('?mode=block&configuration.target=ip&per_page=500');
+if ($response->getStatusCode() === 200) {
+    $json = json_decode($response->getBody()->getContents(), true);
+
+    $rules = array_get($json, 'result', []);
+}
+
+
+foreach ($ips as $ip) {
+    try {
+        if ($mode === 'ban') {
+            $api->post('', [
+                'json' => [
+                    'mode'          => 'block',
+                    'configuration' => (object)[
+                        'target' => 'ip',
+                        'value'  => $ip
+                    ],
+                    'notes'         => sprintf("Fail 2 ban on %s at %s", gethostname(), date('Y-m-d H:i:s'))
+                ]
+            ]);
+        } else {
+            $exists = array_first($rules, function ($rule) use ($ip) {
+                return array_get($rule, 'configuration.value') === $ip;
+            });
+
+            if ($exists) {
+                $api->delete("rules/{$exists['id']}");
+            }
+        }
+    } catch (\GuzzleHttp\Exception\ClientException $e) {
+        if ($e->hasResponse()) {
+            echo $e->getResponse()->getBody()->getContents();
+        } else {
+            echo $e->getMessage();
+        }
+    }
+}
